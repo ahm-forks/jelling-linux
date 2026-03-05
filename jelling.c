@@ -30,6 +30,7 @@
 
 #include <linux/uinput.h>
 #include <systemd/sd-bus.h>
+#include <systemd/sd-event.h>
 
 #define MAN_PATH "/"
 #define ADV_PATH "/adv"
@@ -66,6 +67,15 @@ uinput_cleanup(uinput *i)
 
     ioctl(*i, UI_DEV_DESTROY);
     close(*i);
+}
+
+static void
+sd_event_cleanup(sd_event **loop)
+{
+    if (loop == NULL || *loop == NULL)
+        return;
+
+    sd_event_unref(*loop);
 }
 
 static void
@@ -463,42 +473,54 @@ setup_registration(sd_bus *bus)
         error(EXIT_FAILURE, -r, "Error parsing bluez results");
 }
 
-static void
-on_signal(int sig)
+static int
+on_signal(sd_event_source* src, const struct signalfd_siginfo* sig, void *loop)
 {
+    return 0;
+}
 
+
+static int
+on_term(sd_event_source* src, const struct signalfd_siginfo* sig, void *loop)
+{
+    sd_event_exit((sd_event*)loop, 0);
+    return 0;
 }
 
 int
 main(int argc, char *argv[])
 {
+    SCOPED(sd_event) *loop = NULL;
     SCOPED(sd_bus) *bus = NULL;
     SCOPED(uinput) i = -1;
     int r;
 
-    signal(SIGHUP, on_signal);
-    signal(SIGINT, on_signal);
-    signal(SIGPIPE, on_signal);
-    signal(SIGTERM, on_signal);
-    signal(SIGUSR1, on_signal);
-    signal(SIGUSR2, on_signal);
+    r = sd_event_default(&loop);
+    if (r < 0)
+        error(EXIT_FAILURE, -r, "Error creating event loop: %d", r);
+
+    sd_event_add_signal(loop, NULL, SIGHUP | SD_EVENT_SIGNAL_PROCMASK, on_signal, loop);
+    sd_event_add_signal(loop, NULL, SIGINT | SD_EVENT_SIGNAL_PROCMASK, on_term, loop);
+    sd_event_add_signal(loop, NULL, SIGPIPE| SD_EVENT_SIGNAL_PROCMASK, on_signal, loop);
+    sd_event_add_signal(loop, NULL, SIGTERM| SD_EVENT_SIGNAL_PROCMASK, on_term, loop);
+    sd_event_add_signal(loop, NULL, SIGUSR1| SD_EVENT_SIGNAL_PROCMASK, on_signal, loop);
+    sd_event_add_signal(loop, NULL, SIGUSR2| SD_EVENT_SIGNAL_PROCMASK, on_signal, loop);
 
     r = sd_bus_default_system(&bus);
     if (r < 0)
         error(EXIT_FAILURE, -r, "Error connecting to system bus");
 
+    r = sd_bus_attach_event(bus, loop, 0);
+    if (r < 0)
+        error(EXIT_FAILURE, -r, "Error attaching bus to event loop");
+
     setup_uinput(&i);
     setup_objects(bus, &i);
     setup_registration(bus);
 
-    while ((r = sd_bus_wait(bus, (uint64_t) -1)) >= 0) {
-        while ((r = sd_bus_process(bus, NULL)) > 0)
-            continue;
-        if (r < 0)
-            error(EXIT_FAILURE, -r, "Error processing bus");
-    }
-    if (r < 0 && r != -EINTR)
-        error(EXIT_FAILURE, -r, "Error waiting on bus");
+    r = sd_event_loop(loop);
+    if (r < 0)
+        error(EXIT_FAILURE, -r, "Error running event loop");
 
     return EXIT_SUCCESS;
 }
