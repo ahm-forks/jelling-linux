@@ -17,19 +17,7 @@ configure_file(
     configuration: config,
     install_dir: unitdir
 )
-
-install_data(
-    sources: 'jelling.conf',
-    install_dir: modsdir
-)
-
-executable(
-    'jelling',
-    'jelling.c',
-    install_dir : libexecdir,
-    dependencies: libsystemd,
-    install: true,
-    c_args: [
+c_args = [
         '-Wall',
         '-Wextra',
         '-Werror',
@@ -47,5 +35,19 @@ executable(
         '-Wunused-function',
         '-Wno-missing-field-initializers',
         '-Wno-unused-parameter',
-    ]
+#        '-DENABLE_DEBUG',
+]
+
+install_data(
+    sources: 'jelling.conf',
+    install_dir: modsdir
+)
+
+executable(
+    'jelling',
+    'jelling.c',
+    install_dir : libexecdir,
+    dependencies: libsystemd,
+    install: true,
+    c_args: c_args
 )

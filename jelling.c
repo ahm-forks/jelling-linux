@@ -21,6 +21,9 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+#include <stdarg.h>
+
 
 #include <errno.h>
 #include <error.h>
@@ -57,7 +60,64 @@
 #define SCOPED(type) \
     __attribute__((cleanup(type ## _cleanup))) type
 
+#if ENABLE_DEBUG
+#define DEBUG(format, ...) LOG(DEBUG, format, ## __VA_ARGS__)
+#else
+#define DEBUG(format, ...)
+#endif
+
+#define INFO(format, ...)  LOG(INFO,  format, ## __VA_ARGS__)
+#define WARN(format, ...)  LOG(WARN,  format, ## __VA_ARGS__)
+#define ERROR(format, ...) LOG(ERROR, format, ## __VA_ARGS__)
+#define ABORT(ERRNUM, format, ...) do { \
+    LOG(FATAL, format ": %s", ## __VA_ARGS__, strerror(ERRNUM));\
+    exit(EXIT_FAILURE);\
+} while(0)
+
+typedef enum {
+    DEBUG = 0,
+    INFO  = 5,
+    WARN  = 10,
+    ERROR = 15,
+    FATAL = 20,
+} LogLevel;
+
 typedef int uinput;
+
+static const char *strloglvl(LogLevel lvl)
+{
+    if (lvl >= FATAL) return "FATAL";
+    if (lvl >= ERROR) return "ERROR";
+    if (lvl >= WARN)  return "WARN";
+    if (lvl >= INFO)  return "INFO";
+    if (lvl >= DEBUG) return "DEBUG";
+    return "UNKNOWN";
+}
+
+static void LOG(LogLevel level, const char *fmt, ...)
+{
+    va_list ap;
+    time_t now = time(NULL);
+    struct tm tm;
+
+    localtime_r(&now, &tm);
+
+    fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d [%s] ",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+            strloglvl(level));
+
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
 
 static void
 uinput_cleanup(uinput *i)
@@ -100,17 +160,28 @@ static inline uint16_t
 char2key(uint8_t c)
 {
     switch (c) {
-    case '0': return KEY_0;
-    case '1': return KEY_1;
-    case '2': return KEY_2;
-    case '3': return KEY_3;
-    case '4': return KEY_4;
-    case '5': return KEY_5;
-    case '6': return KEY_6;
-    case '7': return KEY_7;
-    case '8': return KEY_8;
-    case '9': return KEY_9;
-    default: return KEY_UNKNOWN;
+    case '0':
+        return KEY_0;
+    case '1':
+        return KEY_1;
+    case '2':
+        return KEY_2;
+    case '3':
+        return KEY_3;
+    case '4':
+        return KEY_4;
+    case '5':
+        return KEY_5;
+    case '6':
+        return KEY_6;
+    case '7':
+        return KEY_7;
+    case '8':
+        return KEY_8;
+    case '9':
+        return KEY_9;
+    default:
+        return KEY_UNKNOWN;
     }
 }
 
@@ -169,8 +240,8 @@ static int
 chr_notsup(sd_bus_message *m, void *misc, sd_bus_error *err)
 {
     return sd_bus_error_set(
-        err, "org.bluez.Error.NotSupported", "Not supported"
-    );
+               err, "org.bluez.Error.NotSupported", "Not supported"
+           );
 }
 
 static int
@@ -208,30 +279,35 @@ chr_writevalue(sd_bus_message *m, void *misc, sd_bus_error *err)
         return r;
 
     if (size == 0 || size > 32) {
+        WARN("Invalid write length: %zu", size);
         return sd_bus_reply_method_errorf(
-            m, "org.bluez.Error.InvalidValueLength", "Invalid value length"
-        );
+                   m, "org.bluez.Error.InvalidValueLength", "Invalid value length"
+               );
     }
 
     /* Validate input. */
     for (size_t i = 0; i < size; i++) {
         if (char2key(bytes[i]) == KEY_UNKNOWN) {
+            DEBUG("Unknown KeyCode: code %u", bytes[i]);
             return sd_bus_reply_method_errorf(
-                m, "org.bluez.Error.NotPermitted", "Invalid value"
-            );
+                       m, "org.bluez.Error.NotPermitted", "Invalid value"
+                   );
         }
     }
 
-    for (size_t i = 0; i < size && r >= 0; i++)
+    for (size_t i = 0; i < size && r >= 0; i++) {
+        DEBUG("Sending key: %c -> code %u", bytes[i], char2key(bytes[i]));
         r = event(*input, char2key(bytes[i]), true);
+    }
     if (r >= 0)
         r = event(*input, KEY_ENTER, true);
     if (r >= 0)
         r = event(*input, KEY_UNKNOWN, false);
     if (r < 0) {
+        DEBUG("Write failed");
         return sd_bus_reply_method_errorf(
-            m, "org.bluez.Error.Failed", "Write failed"
-        );
+                   m, "org.bluez.Error.Failed", "Write failed"
+               );
     }
 
     return sd_bus_reply_method_return(m, "");
@@ -276,8 +352,8 @@ static int
 on_reply(sd_bus_message *m, void *userdata, sd_bus_error *ret_error)
 {
     if (sd_bus_error_is_set(ret_error))
-        fprintf(stderr, "Error registering: %s: %s\n",
-                ret_error->name, ret_error->message);
+        ERROR("Error registering: %s: %s\n",
+              ret_error->name, ret_error->message);
 
     return 0;
 }
@@ -321,6 +397,7 @@ on_bt_iface(sd_bus_message *m, void *bus, sd_bus_error *ret_error)
                                          "oa{sv}", MAN_PATH, 0);
             if (r < 0)
                 return r;
+            DEBUG("Registering object %s with BlueZ on %s", obj, iface);
         }
 
         if (strcmp(iface, "org.bluez.LEAdvertisingManager1") == 0) {
@@ -329,6 +406,7 @@ on_bt_iface(sd_bus_message *m, void *bus, sd_bus_error *ret_error)
                                          "oa{sv}", ADV_PATH, 0);
             if (r < 0)
                 return r;
+            DEBUG("Registering object %s with BlueZ on %s", obj, iface);
         }
     }
     if (r < 0)
@@ -369,19 +447,20 @@ setup_uinput(uinput *input)
         if (fd < 0) {
             if (errno == ENOENT)
                 continue;
-            error(EXIT_FAILURE, errno, "Error opening %s", devices[i]);
+            ABORT(errno, "Error opening %s", devices[i]);
         }
     }
     if (fd < 0)
-        error(EXIT_FAILURE, errno, "Error finding uevent");
+        ABORT(errno, "Error finding uevent");
 
+    DEBUG("uevent opened at fd %d", fd);
     r = ioctl(fd, UI_SET_EVBIT, EV_KEY);
     if (r < 0)
-        error(EXIT_FAILURE, errno, "Error setting uinput KEY type");
+        ABORT(errno, "Error setting uinput KEY type");
 
     r = ioctl(fd, UI_SET_EVBIT, EV_SYN);
     if (r < 0)
-        error(EXIT_FAILURE, errno, "Error setting uinput SYN type");
+        ABORT(errno, "Error setting uinput SYN type");
 
     for (uint8_t c = 0; c < UINT8_MAX; c++) {
         uint16_t k = char2key(c);
@@ -393,16 +472,16 @@ setup_uinput(uinput *input)
 
         r = ioctl(fd, UI_SET_KEYBIT, k);
         if (r < 0)
-            error(EXIT_FAILURE, errno, "Error setting uinput keybit: %c", c);
+            ABORT(errno, "Error setting uinput keybit: %c", c);
     }
 
     r = write(fd, &dev, sizeof(dev));
     if (r < 0)
-        error(EXIT_FAILURE, errno, "Error writing uinput device description");
+        ABORT(errno, "Error writing uinput device description");
 
     r = ioctl(fd, UI_DEV_CREATE);
     if (r < 0)
-        error(EXIT_FAILURE, errno, "Error creating uinput device");
+        ABORT(errno, "Error creating uinput device");
 
     *input = fd;
     fd = -1;
@@ -415,25 +494,25 @@ setup_objects(sd_bus *bus, uinput *i)
 
     r = sd_bus_add_object_manager(bus, NULL, MAN_PATH);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error adding object manager");
+        ABORT(-r, "Error adding object manager");
 
     r = sd_bus_add_object_vtable(bus, NULL, ADV_PATH,
                                  "org.bluez.LEAdvertisement1",
                                  adv_vtable, i);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error creating advertisement");
+        ABORT(-r, "Error creating advertisement");
 
     r = sd_bus_add_object_vtable(bus, NULL, SVC_PATH,
                                  "org.bluez.GattService1",
                                  svc_vtable, i);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error creating service");
+        ABORT(-r, "Error creating service");
 
     r = sd_bus_add_object_vtable(bus, NULL, CHR_PATH,
                                  "org.bluez.GattCharacteristic1",
                                  chr_vtable, i);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error creating characteristic");
+        ABORT(-r, "Error creating characteristic");
 }
 
 static void
@@ -444,38 +523,39 @@ setup_registration(sd_bus *bus)
 
     r = sd_bus_add_match(bus, NULL, MATCH, on_bt_iface, bus);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error registering for bluetooth interfaces");
+        ABORT(-r, "Error registering for bluetooth interfaces");
 
     r = sd_bus_call_method(bus, "org.bluez", "/",
                            "org.freedesktop.DBus.ObjectManager",
                            "GetManagedObjects", NULL, &msg, "");
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error calling bluez ObjectManager");
+        ABORT(-r, "Error calling bluez ObjectManager");
 
     r = sd_bus_message_enter_container(msg, 'a', "{oa{sa{sv}}}");
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error parsing bluez results");
+        ABORT(-r, "Error parsing bluez results");
 
     while ((r = sd_bus_message_enter_container(msg, 'e', "oa{sa{sv}}")) > 0) {
         r = on_bt_iface(msg, bus, NULL);
         if (r < 0)
-            error(EXIT_FAILURE, -r, "Error parsing bluez results");
+            ABORT(-r, "Error parsing bluez results");
 
         r = sd_bus_message_exit_container(msg);
         if (r < 0)
-            error(EXIT_FAILURE, -r, "Error parsing bluez results");
+            ABORT(-r, "Error parsing bluez results");
     }
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error parsing bluez results");
+        ABORT(-r, "Error parsing bluez results");
 
     r = sd_bus_message_exit_container(msg);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error parsing bluez results");
+        ABORT(-r, "Error parsing bluez results");
 }
 
 static int
 on_signal(sd_event_source* src, const struct signalfd_siginfo* sig, void *loop)
 {
+    DEBUG("Signal %d caught", sig->ssi_signo);
     return 0;
 }
 
@@ -483,6 +563,7 @@ on_signal(sd_event_source* src, const struct signalfd_siginfo* sig, void *loop)
 static int
 on_term(sd_event_source* src, const struct signalfd_siginfo* sig, void *loop)
 {
+    DEBUG("Termination signal %d received, exiting loop", sig->ssi_signo);
     sd_event_exit((sd_event*)loop, 0);
     return 0;
 }
@@ -497,7 +578,7 @@ main(int argc, char *argv[])
 
     r = sd_event_default(&loop);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error creating event loop: %d", r);
+        ABORT(-r, "Error creating event loop");
 
     sd_event_add_signal(loop, NULL, SIGHUP | SD_EVENT_SIGNAL_PROCMASK, on_signal, loop);
     sd_event_add_signal(loop, NULL, SIGINT | SD_EVENT_SIGNAL_PROCMASK, on_term, loop);
@@ -508,19 +589,26 @@ main(int argc, char *argv[])
 
     r = sd_bus_default_system(&bus);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error connecting to system bus");
+        ABORT(-r, "Error connecting to system bus");
+
+#if ENABLE_DEBUG
+    r = sd_bus_request_name(bus, "org.fedorahosted.freeotp.jelling", 0);
+    if (r < 0)
+        ABORT(-r, "Error claiming busname");
+#endif
 
     r = sd_bus_attach_event(bus, loop, 0);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error attaching bus to event loop");
+        ABORT(-r, "Error attaching bus to event loop");
 
     setup_uinput(&i);
     setup_objects(bus, &i);
     setup_registration(bus);
 
+    DEBUG("Entering main event loop");
     r = sd_event_loop(loop);
     if (r < 0)
-        error(EXIT_FAILURE, -r, "Error running event loop");
+        ABORT(-r, "Error running event loop");
 
     return EXIT_SUCCESS;
 }
